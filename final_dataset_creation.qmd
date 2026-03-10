@@ -44,9 +44,7 @@ satoken <- "biostat-203b-2026-winter-92fefbfab477.json"
 # BigQuery authentication using service account
 bq_auth(path = satoken)
 ```
-
 Connect to BigQuery database `mimiciv_3_1` in GCP (Google Cloud Platform), using the project billing account `biostat-203b-2025-winter`.
-
 ```{r}
 # connect to the BigQuery database `biostat-203b-2025-mimiciv_3_1`
 con_bq <- dbConnect(
@@ -56,6 +54,9 @@ con_bq <- dbConnect(
     billing = "biostat-203b-2025-winter"
 )
 con_bq
+```
+List all tables in the `mimiciv_3_1` database.
+```{r}
 dbListTables(con_bq)
 ```
 
@@ -70,6 +71,8 @@ admissions_tble <- tbl(con_bq, "admissions")
 patients_tble <- tbl(con_bq, "patients") 
 # diagnoses_icd data
 diagnoses_tble <- tbl(con_bq, "diagnoses_icd")
+
+chartevents <- tbl(con_bq, "chartevents")
 ```
 
 Identify hypergylcemic crisis diagnoses using ICD-9 codes.
@@ -99,6 +102,55 @@ hg_crisis_hadm <- diagnoses_tble |>
 
 #Deleted: Collect, not to collect too early in case fo merging
 ```
+
+**New**: Adding outcome variable and episodes of high glucose measurements during ICU stay: 
+
+```{r}
+# Find the first day maximum glucose episode
+glucose_ids <- c(220621,220615)
+
+first_day_glucose <- chartevents |>
+  filter(itemid %in% glucose_ids) |>
+  select(stay_id, charttime, valuenum) |>
+  inner_join(
+    icustays_tble |> select(stay_id, intime),
+    by = "stay_id"
+  ) |>
+  filter(
+    charttime >= intime,
+    charttime <= intime + dbplyr::sql("INTERVAL 24 HOUR")
+  ) |>
+  group_by(stay_id) |>
+  summarise(max_glucose = max(valuenum, na.rm = TRUE)) |>
+  mutate(
+    hbg_group = case_when(
+      max_glucose < 140 ~ "No Hyperglycemia",
+      max_glucose < 200 ~ "Mild Hyperglycemia",
+      TRUE ~ "Severe Hyperglycemia"
+    )
+  )
+
+# Add/ Create the outcome Variable
+icu_readmit <- icustays_tble |>
+  group_by(subject_id) |>
+  window_order(intime) |>
+  mutate(
+    next_icu_intime = lead(intime)
+  ) |>
+  ungroup() |>
+  mutate(
+    days_to_next_icu = dbplyr::sql("TIMESTAMP_DIFF(next_icu_intime, outtime, DAY)")
+  ) |>
+  mutate(
+    readmit_30d = case_when(
+      days_to_next_icu <= 30 ~ 1,
+      TRUE ~ 0
+    )
+  ) |>
+  select(stay_id, readmit_30d)
+```
+
+
 
 Build cohort with our established inclusion and exclusion criteria.
 
@@ -134,6 +186,12 @@ hyperglycemic_cohort <- icustays_tble |>
   # add demographics
   left_join(patients_tble, by = "subject_id") |>
   
+  # Add max glucose first measurent
+  left_join(first_day_glucose, by = "stay_id") |>
+  
+  # Add 30 day outcome variable:
+  left_join(icu_readmit, by = "stay_id") |>
+  
   # compute age
   mutate(
     age_intime = anchor_age + year(intime) - anchor_year
@@ -144,10 +202,22 @@ hyperglycemic_cohort <- icustays_tble |>
     age_intime >= 18,
     hospital_expire_flag == 0,
     !is.na(insurance)
-  ) |>
-  
-  collect()
+  ) 
 ```
+
+
+ Collect and work with the data: 
+```{r}
+hyperglycemic_cohort <- hyperglycemic_cohort %>% collect()
+```
+
+
+
+
+
+
+
+
 
 ```{r}
 nrow(hyperglycemic_cohort)          # ICU stays
@@ -157,12 +227,11 @@ summary(hyperglycemic_cohort$age_intime)
 ```
 
 ```{r}
-if (exists("hyperglycemic_cohort")) {
+if (exists("hyperglycemic_cohort_2")) {
   hyperglycemic_cohort |>
-    write_rds("hyperglycemic_cohort.rds", compress = "gz")
+    write_rds("hyperglycemic_cohort_2.rds", compress = "gz")
 }
 ```
-
 
 
 
