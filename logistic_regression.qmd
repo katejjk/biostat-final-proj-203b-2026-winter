@@ -1,0 +1,36 @@
+---
+title: "Biostatistics 203B Final Project"
+author: Name
+format: 
+  html:
+    theme: cosmo
+    embed-resources: true
+    number-sections: false
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    code-fold: false
+---
+
+(2) Run this code AFTER running final_dataset_creation.qmd!
+
+
+```{r}
+hyperglycemic_cohort <- readRDS("hyperglycemic_cohort.rds")
+```
+
+
+
+## Adding Outcome variables of Interest
+
+
+
+
+
+
+
+
+
+
+
+
