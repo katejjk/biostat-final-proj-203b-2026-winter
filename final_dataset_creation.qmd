@@ -214,11 +214,6 @@ hyperglycemic_cohort <- hyperglycemic_cohort %>% collect()
 
 
 
-
-
-
-
-
 ```{r}
 nrow(hyperglycemic_cohort)          # ICU stays
 n_distinct(hyperglycemic_cohort$subject_id)  # patients
