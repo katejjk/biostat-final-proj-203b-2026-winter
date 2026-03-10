@@ -16,21 +16,627 @@ format:
 
 
 ```{r}
-hyperglycemic_cohort <- readRDS("hyperglycemic_cohort.rds")
+# hyperglycemic_cohort <- readRDS("hyperglycemic_cohort_2.rds")
+```
+
+```{r}
+my_data <-
+  hyperglycemic_cohort %>%
+  
+  # lump infrequent levels
+  mutate(
+    first_careunit      = fct_lump_n(first_careunit, n = 4), # n=5, recvommended, did not match the numeric summary on the homework
+    last_careunit       = fct_lump_n(last_careunit, n = 4),
+    admission_type      = fct_lump_n(admission_type, n = 4),
+    admission_location  = fct_lump_n(admission_location, n = 4),
+    discharge_location  = fct_lump_n(discharge_location, n = 4)
+  ) %>%
+  # collapse race categories
+  mutate(
+    race = case_when(
+      str_detect(race, "WHITE")    ~ "WHITE",
+      str_detect(race, "BLACK")    ~ "BLACK",
+      str_detect(race, "HISPANIC") ~ "HISPANIC",
+      str_detect(race, "ASIAN")    ~ "ASIAN",
+      TRUE                         ~ "Other"
+    ) |>
+    factor(levels = c("WHITE","BLACK","HISPANIC","ASIAN","Other"))
+  ) %>%
+  # create long LOS indicator
+  mutate(
+    los_long = los >= 2
+  )
+
+my_data$insurance[is.na(my_data$insurance)] <- "No Insurance"
+```
+
+
+## Descriptive Statistics
+
+```{r}
+my_data |>
+  select(subject_id_x, hbg_group) |>
+  distinct() |>
+  count(hbg_group) |>
+  ggplot(aes(x = hbg_group, y = n)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal() +
+  labs(
+    title = "Hyperglycemia Severity on First ICU Day",
+    x = "Glucose Category",
+    y = "Number of ICU Stays"
+  )  +  scale_fill_brewer(palette = "Blues")
+
+my_data |>
+  count(hbg_group) |>
+  ggplot(aes(x = hbg_group, y = n)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal() +
+  labs(
+    title = "Hyperglycemia Severity on First ICU Day",
+    x = "Glucose Category",
+    y = "Number of ICU Stays"
+  )  +  scale_fill_brewer(palette = "Blues")
+
+
+```
+
+
+## Descriptive Tables
+
+```{r}
+library(table1)
+table1(~ los_long + anchor_age + gender + race + marital_status + insurance  + admission_type | readmit_30d, data = my_data)
 ```
 
 
 
-## Adding Outcome variables of Interest
+
+
+## Logistic Regression
+
+
+```{r}
+model_data <- my_data %>%
+  mutate(
+    readmit_30d = factor(readmit_30d),
+    insurance = factor(insurance),
+    race = factor(race),
+    discharge_location = factor(discharge_location),
+    hbg_group = factor(hbg_group)
+  ) %>%
+  select(
+    readmit_30d,
+    insurance,
+    age_intime,
+    hbg_group,
+    race,
+    discharge_location, 
+    los_long
+  ) %>%
+  na.omit()
+
+model_data$insurance <- relevel(model_data$insurance, ref = "No Insurance")
+#Standard Logistic Regression
+fit_logit <- glm(
+  readmit_30d ~ los_long + insurance + age_intime + hbg_group + race + discharge_location,
+  data = model_data,
+  family = binomial
+)
+summary(fit_logit)
+
+# Report summary of adjusted Odds ratios
+
+library(broom)
+
+logit_results <- tidy(fit_logit, exponentiate = TRUE, conf.int = TRUE)
+
+logit_results
+
+```
+
+
+Next to add for intrepretability let's center age: 
+
+```{r}
+model_data <- model_data %>%
+  mutate(
+    age_centered = scale(age_intime, center = TRUE, scale = FALSE)
+  )
+fit_logit_centered <- glm(
+  readmit_30d ~ insurance + age_centered + hbg_group + race + discharge_location,
+  data = model_data,
+  family = binomial
+)
+
+knitr::kable(tidy(fit_logit_centered, exponentiate = TRUE, conf.int = TRUE) %>%mutate_if(is.numeric, round, 2) %>%
+  select(term, estimate, conf.low, conf.high, p.value))
+```
 
 
 
 
+FItting of LASSO Logistic Regression: 
+
+```{r}
+#install.packages("glmnet")
+library(glmnet)
+
+x <- model.matrix(
+  readmit_30d ~ insurance + age_centered + hbg_group + race + discharge_location,
+  data = model_data
+)[,-1]
+
+y <- model_data$readmit_30d
+
+
+# LASSO with cross-validation
+lasso_model <- cv.glmnet(
+  x,
+  y,
+  family = "binomial",
+  alpha = 1
+)
+
+# Finding the best lambda
+lasso_model$lambda.min
+
+# Select of predictors
+coef(lasso_model, s = "lambda.min")
+```
+
+Checking performation metrics
+
+```{r}
+library(pROC)
+
+pred_prob <- predict(fit_logit, type = "response")
+
+roc_obj <- roc(model_data$readmit_30d, pred_prob)
+
+auc(roc_obj)
+
+library(caret)
+
+# Ensure your actual data and predictions are factors with the same levels
+actual_f <- factor(model_data$readmit_30d)
+pred_f <- factor(ifelse(pred_prob > 0.5, 1, 0))
+
+# Generate the confusion matrix
+confusionMatrix(pred_f, actual_f)
+```
+
+Table of Predictors:
+```{r}
+knitr::kable(logit_results %>%mutate_if(is.numeric, round, 2) %>%
+  select(term, estimate, conf.low, conf.high, p.value))
+```
+
+
+
+Plot of odds ratios: 
+
+```{r}
+library(ggplot2)
+
+logit_results %>%
+  filter(term != "(Intercept)") %>%
+  ggplot(aes(x = estimate, y = term)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    x = "Adjusted Odds Ratio",
+    y = "",
+    title = "Predictors of 30-Day ICU Readmission"
+  )
+```
+
+## ADjusted predicted probability
+
+```{r}
+fit_logit <- glm(
+  readmit_30d ~ insurance + age_intime + hbg_group + race + discharge_location,
+  data = model_data,
+  family = binomial
+)
+
+#Create the prediction dataset
+library(dplyr)
+
+pred_data <- model_data %>%
+  summarise(
+    age_intime = mean(age_intime),
+    hbg_group = names(sort(table(hbg_group), decreasing = TRUE))[1],
+    race = names(sort(table(race), decreasing = TRUE))[1],
+    discharge_location = names(sort(table(discharge_location), decreasing = TRUE))[1]
+  ) %>%
+  slice(rep(1, length(unique(model_data$insurance)))) %>%
+  mutate(
+    insurance = levels(model_data$insurance)
+  )
+
+#predict readmission probabilities
+
+pred_data$pred_prob <- predict(
+  fit_logit,
+  newdata = pred_data,
+  type = "response"
+)
+
+
+#plot the adjusted probabilties
+
+library(ggplot2)
+
+ggplot(pred_data, aes(x = insurance, y = pred_prob)) +
+  geom_col(fill = "steelblue") +
+  theme_minimal() +
+  labs(
+    x = "Insurance Type",
+    y = "Predicted Probability of ICU Readmission",
+    title = "Adjusted 30-Day ICU Readmission Risk by Insurance"
+  )
+# install.packages("ggeffects")
+library(ggeffects)
+pred_insurance <- ggpredict(fit_logit, terms = "insurance")
+
+ggplot(pred_insurance, aes(x = x, y = predicted)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = .1) +
+  theme_minimal() +
+  labs(
+    x = "Insurance Type",
+    y = "Predicted Probability of Readmission",
+    title = "Adjusted Probability of ICU Readmission by Insurance"
+  )
+
+
+```
+
+
+## Improving the Logistic regression model
+
+
+```{r}
+model_data <- my_data %>%
+  mutate(
+    readmit_30d = factor(readmit_30d),
+    insurance = factor(insurance),
+    race = factor(race),
+    discharge_location = factor(discharge_location),
+    hbg_group = factor(hbg_group),
+    hosp_los = as.numeric(dischtime - admittime)
+  ) %>%
+  select(
+    readmit_30d,
+    insurance,
+    age_intime,
+    hbg_group,
+    race,
+    discharge_location, 
+    los_long,
+    hosp_los
+  ) %>%
+  na.omit()
+
+model_data <- model_data %>%
+  mutate(
+    age_centered = scale(age_intime, center = TRUE, scale = FALSE),
+  )
+
+fit_logit2 <- glm(
+  readmit_30d ~ insurance + age_centered + race +
+  discharge_location + los_long + hosp_los + hbg_group,
+  data = model_data,
+  family = binomial
+)
+summary(fit_logit2)
+
+library(pROC)
+
+pred_prob <- predict(fit_logit2, type = "response")
+
+roc_obj <- roc(model_data$readmit_30d, pred_prob)
+
+auc(roc_obj)
+
+
+```
 
 
 
 
+Correlation heatmap:
+
+```{r}
+library(reshape2)
+heatmap_data <- model_data %>%
+  mutate(
+    readmit_30d = as.numeric(readmit_30d),
+    insurance_num = as.numeric(factor(insurance)),
+    race_num = as.numeric(factor(race)),
+    discharge_num = as.numeric(factor(discharge_location)),
+    hbg_num = as.numeric(factor(hbg_group))
+  ) %>%
+  select(
+    readmit_30d,
+    age_intime,
+    los_long,
+    hosp_los,
+    insurance_num,
+    race_num,
+    discharge_num,
+    hbg_num
+  )
+
+heatmap_data <- my_data %>%
+  mutate(
+    readmit_30d = as.numeric(readmit_30d),
+    insurance_num = as.numeric(factor(insurance)),
+    race_num = as.numeric(factor(race)),
+    discharge_num = as.numeric(factor(discharge_location)),
+    hbg_num = as.numeric(factor(hbg_group)),
+    martial_status_num = as.numeric(factor(marital_status)),
+    gender_num = as.numeric(factor(gender)),
+    hosp_los = as.numeric(dischtime - admittime)
+  ) %>%
+  select(
+    readmit_30d,
+    age_intime,
+    los_long,
+    hosp_los,
+    insurance_num,
+    race_num,
+    discharge_num,
+    hbg_num,
+    martial_status_num,
+    gender_num,
+    max_glucose,
+    starts_with("lab"),
+    starts_with("vital")
+  )
+
+corr_matrix <- cor(heatmap_data, use = "complete.obs")
+
+corr_long <- melt(corr_matrix)
+
+ggplot(corr_long, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Correlation Heatmap of Model Variables",
+    x = "",
+    y = "",
+    fill = "Correlation"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+colnames(my_data)
+
+```
 
 
+## Feature Importance
+
+```{r}
+library(glmnet)
+
+x <- model.matrix(
+  readmit_30d ~ age_intime + hbg_group + los_long + hosp_los +
+  insurance + race + discharge_location,
+  data = model_data
+)[,-1]
+
+y <- as.numeric(model_data$readmit_30d)
+
+lasso_model <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+
+coefs <- coef(lasso_model, s = "lambda.min")
+
+coefs_df <- as.data.frame(as.matrix(coefs))
+coefs_df$feature <- rownames(coefs_df)
+coefs_df <- coefs_df[-1, ] # Remove intercept
+
+# Filter non-zero coefficients and sort by absolute value for plotting
+coefs_df <- subset(coefs_df, s1 != 0)
+coefs_df$s1_abs <- abs(coefs_df$s1)
+coefs_df <- coefs_df[order(coefs_df$s1_abs, decreasing = TRUE), ]
+
+# Plot using ggplot2 or base R
+# install.packages("ggplot2")
+library(ggplot2)
+ggplot(coefs_df, aes(x = reorder(feature, s1_abs), y = s1)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Feature", y = "Standardized Coefficient Magnitude", title = "Feature Importance from cv.glmnet") +
+  theme_minimal()
+```
+
+```{r}
+fit_logit2 <- glm(
+  readmit_30d ~ insurance + age_centered + race +
+  discharge_location + los_long + hosp_los + hbg_group,
+  data = model_data,
+  family = binomial
+)
+
+model_data$pred_prob <- predict(
+  fit_logit2,
+  type = "response"
+)
+
+library(pROC)
+library(ggplot2)
+
+roc_obj <- roc(model_data$readmit_30d, model_data$pred_prob)
+
+auc_val <- auc(roc_obj)
+auc_val
+roc_df <- data.frame(
+  tpr = roc_obj$sensitivities,
+  fpr = 1 - roc_obj$specificities
+)
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(size = 1.2, color = "steelblue") +
+  geom_abline(linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = paste("ROC Curve (AUC =", round(auc_val,3), ")"),
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  )
+
+## Plot the calibration curve: 
+library(dplyr)
+
+calibration_data <- model_data %>%
+  mutate(
+    risk_bin = ntile(pred_prob, 10)
+  ) %>%
+  group_by(risk_bin) %>%
+  summarise(
+    predicted = mean(pred_prob),
+    observed = mean(as.numeric(readmit_30d) - 1)
+  )
+
+ggplot(calibration_data, aes(predicted, observed)) +
+  geom_point(size = 3, color = "darkred") +
+  geom_line(color = "darkred") +
+  geom_abline(linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "Calibration Plot",
+    x = "Predicted Readmission Probability",
+    y = "Observed Readmission Rate"
+  )
+
+model_data %>%
+  mutate(risk_group = ntile(pred_prob, 5)) %>%
+  group_by(risk_group) %>%
+  summarise(readmit_rate = mean(as.numeric(readmit_30d)-1)) %>%
+  ggplot(aes(risk_group, readmit_rate)) +
+  geom_col(fill = "purple") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(
+    title = "Observed Readmission Rate by Predicted Risk Quintile",
+    x = "Predicted Risk Quintile",
+    y = "Observed Readmission Rate"
+  )
+
+```
+
+
+
+```{r}
+# library(dplyr)
+# library(dbplyr)
+# library(lubridate)
+# 
+# icustays <- tbl(con_bq, "icustays")
+# admissions <- tbl(con_bq, "admissions")
+# patients <- tbl(con_bq, "patients")
+# diagnoses <- tbl(con_bq, "diagnoses_icd")
+# chartevents <- tbl(con_bq, "chartevents")
+# 
+# # Find DKA and HHS Admissions
+# hg_dx <- diagnoses |>
+#   filter(
+#     icd_code %like% "E101%" |
+#     icd_code %like% "E111%" |
+#     icd_code %like% "E131%" |
+#     icd_code %like% "E141%" |
+#     icd_code %in% c("E1100","E1101","E1300","E1301") |
+#     icd_code %like% "2501%" |
+#     icd_code %like% "2502%"
+#   ) |>
+#   select(subject_id, hadm_id) |>
+#   distinct()
+# 
+# 
+# # Create the ICU cohort
+# cohort <- icustays |>
+#   semi_join(hg_dx, by = c("subject_id","hadm_id")) |>
+#   left_join(admissions, by = c("subject_id","hadm_id")) |>
+#   left_join(patients, by = "subject_id") |>
+#   mutate(
+#     age_intime = anchor_age + year(intime) - anchor_year
+#   ) |>
+#   filter(
+#     age_intime >= 18,
+#     hospital_expire_flag == 0,
+#     !is.na(insurance)
+#   )
+# 
+# # Find the first day maximum glucose episode
+# glucose_ids <- c(220621,220615)
+# 
+# first_day_glucose <- chartevents |>
+#   filter(itemid %in% glucose_ids) |>
+#   select(stay_id, charttime, valuenum) |>
+#   inner_join(
+#     cohort |> select(stay_id, intime),
+#     by = "stay_id"
+#   ) |>
+#   filter(
+#     charttime >= intime,
+#     charttime <= intime + days(1)
+#   ) |>
+#   group_by(stay_id) |>
+#   summarise(max_glucose = max(valuenum, na.rm = TRUE)) |>
+#   mutate(
+#     hbg_group = case_when(
+#       max_glucose < 140 ~ "No Hyperglycemia",
+#       max_glucose < 200 ~ "Mild Hyperglycemia",
+#       TRUE ~ "Severe Hyperglycemia"
+#     )
+#   )
+# 
+# # Add/ Create the outcome Variable
+# icu_readmit <- icustays |>
+#   arrange(subject_id, intime) |>
+#   group_by(subject_id) |>
+#   mutate(
+#     next_icu_intime = lead(intime),
+#     days_to_next_icu = as.numeric(next_icu_intime - outtime)
+#   ) |>
+#   ungroup() |>
+#   mutate(
+#     readmit_30d = case_when(
+#       days_to_next_icu <= 30 ~ 1,
+#       TRUE ~ 0
+#     )
+#   ) |>
+#   select(stay_id, readmit_30d)
+# 
+# 
+# # Merge everything
+# my_data  <- cohort |>
+#   left_join(first_day_glucose, by = "stay_id") |>
+#   left_join(icu_readmit, by = "stay_id") |>
+#   collect()
+```
+
+
+### Sanity check for Dataset: 
+
+```{r}
+nrow(analysis_dataset)
+
+table(analysis_dataset$hbg_group)
+
+table(analysis_dataset$insurance)
+
+mean(analysis_dataset$readmit_30d)
+```
 
 
