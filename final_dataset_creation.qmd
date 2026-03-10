@@ -1,0 +1,168 @@
+---
+title: "Biostatistics 203B Final Project"
+author: Jaimie and Stephanie
+format: 
+  html:
+    theme: cosmo
+    embed-resources: true
+    number-sections: false
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    code-fold: false
+---
+
+Display machine information:
+
+```{r}
+sessionInfo() 
+```
+
+Display my machine information:
+```{r}
+memuse::Sys.meminfo()
+```
+
+Load database libraries and the tidyverse frontend:
+
+```{r}
+library(bigrquery)
+library(dbplyr)
+library(DBI)
+library(gt)
+library(gtsummary)
+library(tidyverse)
+```
+
+Connect to BigQuery
+
+Authenticate with BigQuery using the service account token. Please place the service account token (shared via BruinLearn) in the working directory (same folder as your qmd file). Do **not** ever add this token to your Git repository. If you do so, you will lose 50 points.
+
+```{r}
+# path to the service account token 
+satoken <- "biostat-203b-2026-winter-92fefbfab477.json"
+# BigQuery authentication using service account
+bq_auth(path = satoken)
+```
+
+Connect to BigQuery database `mimiciv_3_1` in GCP (Google Cloud Platform), using the project billing account `biostat-203b-2025-winter`.
+
+```{r}
+# connect to the BigQuery database `biostat-203b-2025-mimiciv_3_1`
+con_bq <- dbConnect(
+    bigrquery::bigquery(),
+    project = "biostat-203b-2025-winter",
+    dataset = "mimiciv_3_1",
+    billing = "biostat-203b-2025-winter"
+)
+con_bq
+dbListTables(con_bq)
+```
+
+Connect to necessary tables.
+
+```{r}
+# full ICU stays table
+icustays_tble <- tbl(con_bq, "icustays") 
+# admissions data
+admissions_tble <- tbl(con_bq, "admissions")
+# patients data
+patients_tble <- tbl(con_bq, "patients") 
+# diagnoses_icd data
+diagnoses_tble <- tbl(con_bq, "diagnoses_icd")
+```
+
+Identify hypergylcemic crisis diagnoses using ICD-9 codes.
+
+```{r}
+# Step 2: Identify hyperglycemic crisis diagnoses
+hg_crisis_hadm <- diagnoses_tble |>
+  filter(
+    # DKA - ICD10
+    icd_code %like% "E101%" |
+    icd_code %like% "E111%" |
+    icd_code %like% "E131%" |
+    icd_code %like% "E141%" |
+     # HHS ICD10
+    icd_code %like% "E100%" |
+    icd_code %like% "E110%" |
+    icd_code %like% "E130%" |
+    icd_code %like% "E140%" |
+      
+    # DKA - ICD9
+    icd_code %like% "2501%" |
+    # HHS - ICD9
+    icd_code %like% "2502%"
+  ) |>
+  select(subject_id, hadm_id) |>
+  distinct() 
+
+#Deleted: Collect, not to collect too early in case fo merging
+```
+
+Build cohort with our established inclusion and exclusion criteria.
+
+```{r}
+# hyperglycemic_cohort <- icustays_tble |>
+#   group_by(subject_id) |>
+#   slice_min(intime, n = 1) |>
+#   ungroup() |>
+#   left_join(admissions_tble, by = c("subject_id", "hadm_id")) |>
+#   left_join(patients_tble, by = "subject_id") |>
+#   filter(hospital_expire_flag == 0) |>
+#   filter(!is.na(insurance)) |>
+#   collect() |>
+#   semi_join(hg_crisis_hadm, by = c("subject_id", "hadm_id")) |>
+#   mutate(
+#     age_intime = anchor_age + year(intime) - anchor_year
+#   ) |>
+#   filter(age_intime >= 18)
+# Build cohort
+hyperglycemic_cohort <- icustays_tble |>
+  
+  # keep ICU stays linked to hyperglycemic admissions
+  semi_join(hg_crisis_hadm, by = c("subject_id", "hadm_id")) |>
+  
+  # choose first ICU stay during that admission
+  group_by(subject_id, hadm_id) |>
+  slice_min(intime, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  
+  # add admission info
+  left_join(admissions_tble, by = c("subject_id", "hadm_id")) |>
+  
+  # add demographics
+  left_join(patients_tble, by = "subject_id") |>
+  
+  # compute age
+  mutate(
+    age_intime = anchor_age + year(intime) - anchor_year
+  ) |>
+  
+  # apply exclusions
+  filter(
+    age_intime >= 18,
+    hospital_expire_flag == 0,
+    !is.na(insurance)
+  ) |>
+  
+  collect()
+```
+
+```{r}
+nrow(hyperglycemic_cohort)          # ICU stays
+n_distinct(hyperglycemic_cohort$subject_id)  # patients
+table(hyperglycemic_cohort$insurance)
+summary(hyperglycemic_cohort$age_intime)
+```
+
+```{r}
+if (exists("hyperglycemic_cohort")) {
+  hyperglycemic_cohort |>
+    write_rds("hyperglycemic_cohort.rds", compress = "gz")
+}
+```
+
+
+
+
